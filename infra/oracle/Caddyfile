@@ -1,0 +1,25 @@
+# KRATOS API edge: automatic HTTPS (Let's Encrypt) and FastCGI to php-fpm.
+# Only the API is served here; the SPA is on Vercel.
+{$KRATOS_API_HOST} {
+	request_body {
+		max_size 1MB
+	}
+	header {
+		-Server
+	}
+
+	@api path /api/* /sanctum/* /up
+	handle @api {
+		rewrite * /index.php
+		reverse_proxy core:9000 {
+			transport fastcgi {
+				root /var/www/html/public
+				split .php
+			}
+		}
+	}
+
+	handle {
+		respond 404
+	}
+}

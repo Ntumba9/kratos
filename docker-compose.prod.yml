@@ -1,0 +1,153 @@
+# KRATOS production profile for a single VM (e.g. Oracle Cloud Always Free).
+#
+#   sh infra/oracle/setup.sh        # generates .env.prod and starts the stack
+#
+# The SPA is hosted separately (Vercel) and proxies /api and /sanctum to this
+# host, so the browser sees one origin. Only Caddy publishes ports (80/443,
+# automatic TLS); PostgreSQL, Redis and MIND are not reachable from outside.
+
+name: kratos
+
+x-core-env: &core-env
+  APP_ENV: production
+  APP_DEBUG: "false"
+  APP_KEY: ${KRATOS_APP_KEY:?set KRATOS_APP_KEY}
+  APP_URL: ${KRATOS_FRONTEND_URL:?set KRATOS_FRONTEND_URL}
+  FRONTEND_URL: ${KRATOS_FRONTEND_URL}
+  SANCTUM_STATEFUL_DOMAINS: ${KRATOS_FRONTEND_HOST:?set KRATOS_FRONTEND_HOST}
+  SESSION_SECURE_COOKIE: "true"
+  DB_CONNECTION: pgsql
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_DATABASE: kratos
+  DB_USERNAME: kratos_app
+  DB_PASSWORD: ${KRATOS_DB_APP_PASSWORD:?set KRATOS_DB_APP_PASSWORD}
+  DB_OWNER_USERNAME: kratos_owner
+  DB_OWNER_PASSWORD: ${KRATOS_DB_OWNER_PASSWORD:?set KRATOS_DB_OWNER_PASSWORD}
+  REDIS_HOST: redis
+  REDIS_PASSWORD: ${KRATOS_REDIS_PASSWORD:?set KRATOS_REDIS_PASSWORD}
+  REDIS_PORT: "6379"
+  CACHE_STORE: redis
+  QUEUE_CONNECTION: redis
+  SESSION_DRIVER: database
+  # No mail provider configured yet: messages (incl. verification links) are
+  # written to the log. Set MAIL_MAILER=smtp and MAIL_* to send real email.
+  MAIL_MAILER: ${KRATOS_MAIL_MAILER:-log}
+  LOG_CHANNEL: stderr
+  LOG_STDERR_FORMATTER: Monolog\Formatter\JsonFormatter
+  MIND_URL: http://mind:8000
+  MIND_SHARED_SECRET: ${KRATOS_MIND_SHARED_SECRET:?set KRATOS_MIND_SHARED_SECRET}
+
+x-core-image: &core-image
+  image: kratos-core:prod
+  build:
+    context: .
+    dockerfile: infra/docker/php/Dockerfile
+    target: prod
+  environment: *core-env
+  networks: [default, intelligence]
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${KRATOS_POSTGRES_SUPERUSER_PASSWORD:?set KRATOS_POSTGRES_SUPERUSER_PASSWORD}
+      POSTGRES_DB: postgres
+      KRATOS_DB_OWNER_PASSWORD: ${KRATOS_DB_OWNER_PASSWORD}
+      KRATOS_DB_APP_PASSWORD: ${KRATOS_DB_APP_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d kratos"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--requirepass", "${KRATOS_REDIS_PASSWORD}", "--appendonly", "yes"]
+    environment:
+      REDIS_PASSWORD: ${KRATOS_REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  core-init:
+    <<: *core-image
+    command: ["sh", "-c", "php artisan migrate --database=pgsql_owner --force && php artisan db:seed --database=pgsql_owner --force"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: "no"
+
+  core:
+    <<: *core-image
+    depends_on:
+      core-init: { condition: service_completed_successfully }
+
+  worker:
+    <<: *core-image
+    command: ["php", "artisan", "queue:work", "redis", "--queue=events,default,mail", "--tries=5", "--backoff=10,30,90,270", "--max-time=3600", "--sleep=1"]
+    stop_grace_period: 60s
+    depends_on:
+      core-init: { condition: service_completed_successfully }
+    healthcheck: { disable: true }
+
+  outbox-relay:
+    <<: *core-image
+    command: ["php", "artisan", "kratos:outbox:relay"]
+    depends_on:
+      core-init: { condition: service_completed_successfully }
+    healthcheck: { disable: true }
+
+  scheduler:
+    <<: *core-image
+    command: ["php", "artisan", "schedule:work"]
+    depends_on:
+      core-init: { condition: service_completed_successfully }
+    healthcheck: { disable: true }
+
+  mind:
+    image: kratos-mind:prod
+    build:
+      context: .
+      dockerfile: mind/Dockerfile
+      target: prod
+    environment:
+      MIND_SHARED_SECRET: ${KRATOS_MIND_SHARED_SECRET}
+      MIND_MODELS_DIR: /srv/mind/models
+      MIND_LOG_LEVEL: INFO
+    networks: [intelligence]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.10-alpine
+    ports: ["80:80", "443:443"]
+    environment:
+      KRATOS_API_HOST: ${KRATOS_API_HOST:?set KRATOS_API_HOST}
+    volumes:
+      - ./infra/oracle/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [core]
+    restart: unless-stopped
+
+networks:
+  default:
+  intelligence:
+    internal: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

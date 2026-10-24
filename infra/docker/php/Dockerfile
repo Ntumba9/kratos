@@ -35,3 +35,4 @@ RUN composer dump-autoload --optimize --classmap-authoritative --no-dev \
  && rm -f .env \
  && chown -R www-data:www-data storage bootstrap/cache
 USER www-data
+
