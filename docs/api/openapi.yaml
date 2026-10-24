@@ -1,0 +1,1140 @@
+openapi: 3.1.0
+info:
+  title: KRATOS API
+  version: 1.0.0-phase1
+  summary: Autonomous Threat Intelligence & Cyber Defense Platform
+  description: |
+    Versioned REST API of KRATOS CORE.
+
+    **Authentication**
+    - Browser (KRATOS COMMAND): Sanctum session cookie. Call `GET /sanctum/csrf-cookie`
+      first, then send the `XSRF-TOKEN` cookie value in the `X-XSRF-TOKEN` header.
+    - Programmatic clients: `Authorization: Bearer <personal access token>`.
+      Tokens carry `read` (safe methods) and/or `write` (state-changing methods) abilities.
+
+    **Conventions**
+    - Success: `{"data": …, "meta": {…}}`. Errors: `{"error": {"code", "message", "details"}, "request_id"}`.
+    - Lists: `?page=&per_page=` (max 100) and `?sort=field` / `?sort=-field`.
+    - Tenant resources live under `/organisations/{organisation}`; non-members receive `404`.
+    - Every response carries `X-Request-Id`.
+
+    The test `core/tests/Feature/OpenApiContractTest.php` fails if any API route is
+    missing from this document or documented here but not implemented.
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development (Docker Compose)
+
+tags:
+  - name: System
+  - name: Authentication
+  - name: Account security
+  - name: Organisations
+  - name: Members
+  - name: Audit
+  - name: Platform
+  - name: Ingestion
+  - name: Monitoring
+  - name: Assets
+  - name: Intelligence
+
+security:
+  - sessionCookie: []
+  - bearerToken: []
+
+paths:
+  /health:
+    get:
+      tags: [System]
+      summary: Dependency readiness
+      security: []
+      responses:
+        '200': { description: All dependencies up, content: { application/json: { schema: { $ref: '#/components/schemas/HealthEnvelope' } } } }
+        '503': { description: One or more dependencies down, content: { application/json: { schema: { $ref: '#/components/schemas/HealthEnvelope' } } } }
+
+  /ingest/events:
+    post:
+      tags: [Ingestion]
+      summary: Ingest one security event (machine clients)
+      description: |
+        Authenticated by HMAC request signature (ADR-0006), not by user session or token.
+        Body limit 256 KiB. Rate limited per credential (default 600/min).
+        Returns `202` when stored, or `200` with `duplicate: true` when the same event
+        (same `Idempotency-Key`, or identical content) was already received.
+      security: [{ hmacSignature: [] }]
+      parameters:
+        - $ref: '#/components/parameters/KratosKey'
+        - $ref: '#/components/parameters/KratosTimestamp'
+        - $ref: '#/components/parameters/KratosSignature'
+        - { name: Idempotency-Key, in: header, schema: { type: string, maxLength: 128 } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/EventInput' } } }
+      responses:
+        '202': { $ref: '#/components/responses/IngestAccepted' }
+        '200': { $ref: '#/components/responses/IngestAccepted' }
+        '400': { description: Body is not valid JSON (`invalid_json`), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '401': { description: Signature, key, or timestamp invalid (`invalid_signature`), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '409': { description: Idempotency key reused with a different payload (`idempotency_conflict`), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '413': { description: Body too large (`payload_too_large`), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '415': { description: Not application/json (`unsupported_media_type`), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /ingest/events/batch:
+    post:
+      tags: [Ingestion]
+      summary: Ingest up to 100 events
+      description: Each event is processed independently. `202` if any was accepted, `200` if all were duplicates, `422` if all were rejected.
+      security: [{ hmacSignature: [] }]
+      parameters:
+        - $ref: '#/components/parameters/KratosKey'
+        - $ref: '#/components/parameters/KratosTimestamp'
+        - $ref: '#/components/parameters/KratosSignature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [events]
+              additionalProperties: false
+              properties:
+                events: { type: array, minItems: 1, maxItems: 100, items: { $ref: '#/components/schemas/EventInput' } }
+      responses:
+        '202': { $ref: '#/components/responses/BatchResult' }
+        '200': { $ref: '#/components/responses/BatchResult' }
+        '401': { description: Authentication failed, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '413': { description: Body too large, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '422': { $ref: '#/components/responses/BatchResult' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /auth/register:
+    post:
+      tags: [Authentication]
+      summary: Register a user and their first organisation (browser only)
+      description: Creates the user, an organisation with the user as Organisation Administrator, queues a verification email and starts a session.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, password_confirmation, organisation_name]
+              properties:
+                name: { type: string, minLength: 2, maxLength: 120 }
+                email: { type: string, format: email, maxLength: 254 }
+                password: { type: string, minLength: 12, maxLength: 128, description: 'Mixed case letters and numbers required' }
+                password_confirmation: { type: string }
+                organisation_name: { type: string, minLength: 2, maxLength: 120 }
+      responses:
+        '201': { $ref: '#/components/responses/CurrentUser' }
+        '400': { $ref: '#/components/responses/StatefulRequired' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: Start a browser session
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+                remember: { type: boolean }
+      responses:
+        '200': { $ref: '#/components/responses/CurrentUser' }
+        '400': { $ref: '#/components/responses/StatefulRequired' }
+        '401': { description: Invalid credentials (identical for unknown accounts), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      summary: End the current browser session
+      responses:
+        '204': { description: Logged out }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/me:
+    get:
+      tags: [Authentication]
+      summary: Current principal, memberships and effective permissions
+      responses:
+        '200': { $ref: '#/components/responses/CurrentUser' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/forgot-password:
+    post:
+      tags: [Authentication]
+      summary: Request a password reset email
+      description: Always returns 202 whether or not the account exists.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [email], properties: { email: { type: string, format: email } } }
+      responses:
+        '202': { $ref: '#/components/responses/Message' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/reset-password:
+    post:
+      tags: [Authentication]
+      summary: Reset a password with an emailed token
+      description: On success every existing browser session for the account is ended.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, email, password, password_confirmation]
+              properties:
+                token: { type: string }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 12 }
+                password_confirmation: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Message' }
+        '422': { description: Validation failed or invalid/expired token (`invalid_reset_token`), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /auth/email/verify/{id}/{hash}:
+    get:
+      tags: [Authentication]
+      summary: Signed email verification link
+      description: Opened from the verification email. Redirects to `/verify-email?status=verified|already-verified|invalid` in KRATOS COMMAND.
+      security: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: hash, in: path, required: true, schema: { type: string } }
+        - { name: expires, in: query, required: true, schema: { type: integer } }
+        - { name: signature, in: query, required: true, schema: { type: string } }
+      responses:
+        '302': { description: Redirect to KRATOS COMMAND with the verification outcome }
+
+  /auth/email/verification-notification:
+    post:
+      tags: [Authentication]
+      summary: Resend the verification email
+      responses:
+        '200': { $ref: '#/components/responses/Message' }
+        '202': { $ref: '#/components/responses/Message' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/password:
+    put:
+      tags: [Account security]
+      summary: Change password
+      description: Ends every other browser session of the user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, password, password_confirmation]
+              properties:
+                current_password: { type: string }
+                password: { type: string, minLength: 12 }
+                password_confirmation: { type: string }
+      responses:
+        '204': { description: Password changed }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /auth/sessions:
+    get:
+      tags: [Account security]
+      summary: List the caller's browser sessions
+      description: Session IDs are secrets and are never returned; `id` is an opaque handle.
+      responses:
+        '200':
+          description: Sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Session' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+    delete:
+      tags: [Account security]
+      summary: Revoke every session except the current one
+      responses:
+        '204': { description: Revoked }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/sessions/{handle}:
+    delete:
+      tags: [Account security]
+      summary: Revoke one session
+      parameters:
+        - { name: handle, in: path, required: true, schema: { type: string, pattern: '^[a-f0-9]{64}$' } }
+      responses:
+        '204': { description: Revoked }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Attempt to revoke the current session (use logout) }
+
+  /auth/tokens:
+    get:
+      tags: [Account security]
+      summary: List active personal access tokens
+      responses:
+        '200':
+          description: Tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AccessToken' } }
+    post:
+      tags: [Account security]
+      summary: Create a personal access token
+      description: The plaintext token is returned exactly once; only a SHA-256 digest is stored. Requires a verified email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, abilities]
+              properties:
+                name: { type: string, minLength: 2, maxLength: 120 }
+                abilities: { type: array, minItems: 1, items: { type: string, enum: [read, write] } }
+                expires_in_days: { type: integer, minimum: 1, maximum: 365, default: 90 }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      token: { $ref: '#/components/schemas/AccessToken' }
+                      plain_text_token: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /auth/tokens/{tokenId}:
+    delete:
+      tags: [Account security]
+      summary: Revoke a personal access token
+      parameters:
+        - { name: tokenId, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Revoked }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /intelligence/model:
+    get:
+      tags: [Intelligence]
+      summary: Active anomaly model and its synthetic evaluation (model card)
+      description: Live from KRATOS MIND when reachable, otherwise the last recorded version. All metrics are measured on synthetic data.
+      responses:
+        '200': { description: Model, content: { application/json: { schema: { type: object, properties: { data: { $ref: '#/components/schemas/ModelCard' } } } } } }
+        '503': { description: No model has been seen yet (`model_unavailable`), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /roles:
+    get:
+      tags: [Organisations]
+      summary: Role catalogue with permissions
+      responses:
+        '200':
+          description: Roles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Role' } }
+
+  /organisations:
+    get:
+      tags: [Organisations]
+      summary: Organisations the caller belongs to
+      responses:
+        '200':
+          description: Organisations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Organisation' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Organisations]
+      summary: Create an organisation (caller becomes its administrator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [name], properties: { name: { type: string, minLength: 2, maxLength: 120 } } }
+      responses:
+        '201': { $ref: '#/components/responses/OrganisationResponse' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /organisations/{organisation}:
+    parameters: [{ $ref: '#/components/parameters/Organisation' }]
+    get:
+      tags: [Organisations]
+      summary: Organisation profile
+      description: 'Permission: organisation.view'
+      responses:
+        '200': { $ref: '#/components/responses/OrganisationResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Organisations]
+      summary: Update organisation settings
+      description: 'Permission: organisation.update'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 2, maxLength: 120 }
+                event_retention_days: { type: integer, minimum: 1, maximum: 3650 }
+      responses:
+        '200': { $ref: '#/components/responses/OrganisationResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /organisations/{organisation}/members:
+    parameters: [{ $ref: '#/components/parameters/Organisation' }]
+    get:
+      tags: [Members]
+      summary: List members
+      description: 'Permission: members.view. Sortable: created_at.'
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: Members
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Membership' } }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Members]
+      summary: Add an existing verified user
+      description: 'Permission: members.manage'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email }
+                role: { type: string, enum: [org_admin, analyst, viewer] }
+      responses:
+        '201': { $ref: '#/components/responses/MembershipResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /organisations/{organisation}/members/{membership}:
+    parameters:
+      - $ref: '#/components/parameters/Organisation'
+      - { name: membership, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      tags: [Members]
+      summary: Change a member's role
+      description: 'Permission: members.manage. The last Organisation Administrator cannot be demoted (409).'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [role], properties: { role: { type: string, enum: [org_admin, analyst, viewer] } } }
+      responses:
+        '200': { $ref: '#/components/responses/MembershipResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [Members]
+      summary: Remove a member
+      description: 'Permission: members.manage. The last Organisation Administrator cannot be removed (409).'
+      responses:
+        '204': { description: Removed }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /organisations/{organisation}/audit-logs:
+    parameters: [{ $ref: '#/components/parameters/Organisation' }]
+    get:
+      tags: [Audit]
+      summary: Organisation audit log (append-only)
+      description: 'Permission: audit_logs.view. Sortable: created_at, action. Default sort: -created_at.'
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+        - $ref: '#/components/parameters/Sort'
+        - { name: 'filter[action]', in: query, schema: { type: string, pattern: '^[a-z0-9_.]+$' }, description: Action prefix }
+        - { name: 'filter[actor_user_id]', in: query, schema: { type: string, format: uuid } }
+        - { name: 'filter[from]', in: query, schema: { type: string, format: date-time } }
+        - { name: 'filter[to]', in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200':
+          description: Audit records
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AuditLog' } }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /organisations/{organisation}/stats/overview:
+    parameters: [{ $ref: '#/components/parameters/Organisation' }]
+    get:
+      tags: [Monitoring]
+      summary: Security overview statistics
+      description: 'Permission: events.view. Computed from stored data at request time.'
+      responses:
+        '200': { description: Statistics, content: { application/json: { schema: { type: object, properties: { data: { $ref: '#/components/schemas/OverviewStats' } } } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /organisations/{organisation}/events:
+    parameters: [{ $ref: '#/components/parameters/Organisation' }]
+    get:
+      tags: [Monitoring]
+      summary: Search security events
+      description: 'Permission: events.view. Sortable: occurred_at, received_at, severity (by rank), event_type. Default -occurred_at.'
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+        - $ref: '#/components/parameters/Sort'
+        - { name: 'filter[severity]', in: query, schema: { type: string }, description: 'Comma-separated, e.g. high,critical' }
+        - { name: 'filter[event_type]', in: query, schema: { type: string } }
+        - { name: 'filter[source]', in: query, schema: { type: string } }
+        - { name: 'filter[status]', in: query, schema: { type: string, enum: [received, queued, processing, processed, failed, dead_lettered] } }
+        - { name: 'filter[asset_id]', in: query, schema: { type: string, format: uuid } }
+        - { name: 'filter[source_ip]', in: query, schema: { type: string } }
+        - { name: 'filter[from]', in: query, schema: { type: string, format: date-time } }
+        - { name: 'filter[to]', in: query, schema: { type: string, format: date-time } }
+        - { name: 'filter[q]', in: query, schema: { type: string }, description: 'Matches event type, source or source IP' }
+        - { name: 'filter[verdict]', in: query, schema: { type: string }, description: 'Comma-separated: benign, suspicious, malicious' }
+        - { name: 'filter[min_risk]', in: query, schema: { type: number, minimum: 0, maximum: 100 } }
+      responses:
+        '200':
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/SecurityEvent' } }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /organisations/{organisation}/events/{event}:
+    parameters:
+      - $ref: '#/components/parameters/Organisation'
+      - { name: event, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Monitoring]
+      summary: Event detail including processing state
+      responses:
+        '200': { description: Event, content: { application/json: { schema: { type: object, properties: { data: { $ref: '#/components/schemas/SecurityEvent' } } } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /organisations/{organisation}/events/{event}/replay:
+    parameters:
+      - $ref: '#/components/parameters/Organisation'
+      - { name: event, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Monitoring]
+      summary: Replay a failed or dead-lettered event
+      description: 'Permission: events.manage. Re-queues through the outbox.'
+      responses:
+        '202': { description: Re-queued, content: { application/json: { schema: { type: object, properties: { data: { $ref: '#/components/schemas/SecurityEvent' } } } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /organisations/{organisation}/assets:
+    parameters: [{ $ref: '#/components/parameters/Organisation' }]
+    get:
+      tags: [Assets]
+      summary: List monitored assets
+      description: 'Permission: assets.view. Sortable: name, criticality, last_seen_at, created_at.'
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+        - $ref: '#/components/parameters/Sort'
+        - { name: 'filter[asset_type]', in: query, schema: { type: string } }
+        - { name: 'filter[criticality]', in: query, schema: { type: string } }
+        - { name: 'filter[environment]', in: query, schema: { type: string } }
+        - { name: 'filter[q]', in: query, schema: { type: string } }
+        - { name: 'filter[include_retired]', in: query, schema: { type: boolean } }
+      responses:
+        '200':
+          description: Assets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Asset' } }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Assets]
+      summary: Register an asset
+      description: 'Permission: assets.manage'
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AssetInput' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { type: object, properties: { data: { $ref: '#/components/schemas/Asset' } } } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /organisations/{organisation}/assets/{asset}:
+    parameters:
+      - $ref: '#/components/parameters/Organisation'
+      - { name: asset, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Assets]
+      summary: Asset detail (includes retired assets)
+      responses:
+        '200': { description: Asset, content: { application/json: { schema: { type: object, properties: { data: { $ref: '#/components/schemas/Asset' } } } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Assets]
+      summary: Update an asset
+      description: 'Permission: assets.manage'
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AssetInput' } } } }
+      responses:
+        '200': { description: Updated, content: { application/json: { schema: { type: object, properties: { data: { $ref: '#/components/schemas/Asset' } } } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+    delete:
+      tags: [Assets]
+      summary: Retire an asset (soft delete; history is kept)
+      description: 'Permission: assets.manage'
+      responses:
+        '204': { description: Retired }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /organisations/{organisation}/api-credentials:
+    parameters: [{ $ref: '#/components/parameters/Organisation' }]
+    get:
+      tags: [Ingestion]
+      summary: List ingestion credentials (secrets are never returned)
+      description: 'Permission: api_credentials.manage'
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: Credentials
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/ApiCredential' } }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Ingestion]
+      summary: Issue an ingestion credential
+      description: 'Permission: api_credentials.manage. The secret is returned exactly once.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 2, maxLength: 120 }
+                expires_in_days: { type: [integer, 'null'], minimum: 1, maximum: 730 }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      credential: { $ref: '#/components/schemas/ApiCredential' }
+                      secret: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /organisations/{organisation}/api-credentials/{credential}:
+    parameters:
+      - $ref: '#/components/parameters/Organisation'
+      - { name: credential, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      tags: [Ingestion]
+      summary: Revoke an ingestion credential (takes effect immediately)
+      responses:
+        '204': { description: Revoked }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /organisations/{organisation}/stats/intelligence:
+    parameters: [{ $ref: '#/components/parameters/Organisation' }]
+    get:
+      tags: [Intelligence]
+      summary: Threat intelligence statistics (last 24 h)
+      description: 'Permission: detections.view. Verdicts, categories, risk histogram, rule hits, hourly anomaly trend.'
+      responses:
+        '200': { description: Statistics, content: { application/json: { schema: { type: object, properties: { data: { type: object } } } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /organisations/{organisation}/detections:
+    parameters: [{ $ref: '#/components/parameters/Organisation' }]
+    get:
+      tags: [Intelligence]
+      summary: Detection evidence (rule hits, anomaly and statistical results)
+      description: 'Permission: detections.view. Sortable: created_at, score.'
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+        - $ref: '#/components/parameters/Sort'
+        - { name: 'filter[detector]', in: query, schema: { type: string, enum: [rule, anomaly_model, statistical] } }
+        - { name: 'filter[rule_key]', in: query, schema: { type: string } }
+        - { name: 'filter[from]', in: query, schema: { type: string, format: date-time } }
+        - { name: 'filter[to]', in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200':
+          description: Detections
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/DetectionResult' } }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /organisations/{organisation}/detection-rules:
+    parameters: [{ $ref: '#/components/parameters/Organisation' }]
+    get:
+      tags: [Intelligence]
+      summary: Effective detection rules (built-in merged with this organisation's overrides)
+      description: 'Permission: detections.view'
+      responses:
+        '200': { description: Rules, content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/DetectionRule' } } } } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /organisations/{organisation}/detection-rules/{key}:
+    parameters:
+      - $ref: '#/components/parameters/Organisation'
+      - { name: key, in: path, required: true, schema: { type: string, pattern: '^[a-z0-9_]+$' } }
+    patch:
+      tags: [Intelligence]
+      summary: Enable/disable or tune a rule for this organisation (within bounds)
+      description: 'Permission: detections.manage. Audited.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                parameters: { type: object, additionalProperties: { type: number } }
+      responses:
+        '200': { description: Effective rule, content: { application/json: { schema: { type: object, properties: { data: { $ref: '#/components/schemas/DetectionRule' } } } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+    delete:
+      tags: [Intelligence]
+      summary: Reset a rule to the built-in defaults
+      description: 'Permission: detections.manage'
+      responses:
+        '204': { description: Reset }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /platform/organisations:
+    get:
+      tags: [Platform]
+      summary: All organisations (metadata only)
+      description: 'Permission: platform.organisations.view (Platform Administrator). Sortable: name, created_at.'
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: Organisations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Organisation' } }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: kratos-session
+      description: Laravel session cookie plus `X-XSRF-TOKEN` header (first-party SPA only).
+    hmacSignature:
+      type: apiKey
+      in: header
+      name: X-Kratos-Signature
+      description: |
+        `v1=` + hex(HMAC-SHA256(secret, METHOD + "\n" + PATH + "\n" + TIMESTAMP + "\n" + hex(SHA-256(body)))),
+        sent with `X-Kratos-Key` and `X-Kratos-Timestamp` (unix seconds, within 300 s). See ADR-0006.
+    bearerToken:
+      type: http
+      scheme: bearer
+      description: Personal access token (`kratos_pat_…`).
+
+  parameters:
+    KratosKey: { name: X-Kratos-Key, in: header, required: true, schema: { type: string, example: krk_xxxxxxxxxxxxxxxxxxxxxxxx } }
+    KratosTimestamp: { name: X-Kratos-Timestamp, in: header, required: true, schema: { type: string, pattern: '^[0-9]+$' } }
+    KratosSignature: { name: X-Kratos-Signature, in: header, required: true, schema: { type: string, pattern: '^v1=[0-9a-f]{64}$' } }
+    Organisation: { name: organisation, in: path, required: true, schema: { type: string, format: uuid } }
+    Page: { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+    PerPage: { name: per_page, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+    Sort: { name: sort, in: query, schema: { type: string }, description: 'Allow-listed field; prefix with - for descending' }
+
+  responses:
+    IngestAccepted:
+      description: Stored (202) or duplicate of an existing event (200)
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  status: { type: string, enum: [accepted, duplicate] }
+                  duplicate: { type: boolean }
+                  processing_status: { type: string }
+                  received_at: { type: string, format: date-time }
+    BatchResult:
+      description: Per-event outcomes
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    index: { type: integer }
+                    status: { type: string, enum: [accepted, duplicate, rejected] }
+                    id: { type: string, format: uuid }
+                    errors: { type: object, additionalProperties: { type: array, items: { type: string } } }
+              meta:
+                type: object
+                properties:
+                  summary: { type: object, properties: { accepted: { type: integer }, duplicate: { type: integer }, rejected: { type: integer } } }
+    CurrentUser:
+      description: Current principal
+      content: { application/json: { schema: { type: object, properties: { data: { $ref: '#/components/schemas/CurrentUser' } } } } }
+    OrganisationResponse:
+      description: Organisation
+      content: { application/json: { schema: { type: object, properties: { data: { $ref: '#/components/schemas/Organisation' } } } } }
+    MembershipResponse:
+      description: Membership
+      content: { application/json: { schema: { type: object, properties: { data: { $ref: '#/components/schemas/Membership' } } } } }
+    Message:
+      description: Informational message
+      content: { application/json: { schema: { type: object, properties: { data: { type: object, properties: { message: { type: string } } } } } } }
+    Unauthenticated: { description: Authentication required (`unauthenticated`), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Forbidden: { description: 'Missing permission (`forbidden`), unverified email (`email_unverified`) or token ability (`token_ability_missing`)', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    NotFound: { description: Not found, or not a member of the organisation (`not_found`), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Conflict: { description: Conflicts with current state (`conflict`), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    ValidationFailed: { description: Invalid payload (`validation_failed`, field errors in `error.details`), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    RateLimited:
+      description: Too many requests (`rate_limited`)
+      headers: { Retry-After: { schema: { type: integer } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    StatefulRequired: { description: Browser-only endpoint called without a first-party Origin (`stateful_request_required`), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  schemas:
+    Error:
+      type: object
+      required: [error, request_id]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, examples: [validation_failed, not_found, forbidden] }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+        request_id: { type: [string, 'null'] }
+    PaginationMeta:
+      type: object
+      properties:
+        pagination:
+          type: object
+          properties:
+            page: { type: integer }
+            per_page: { type: integer }
+            total: { type: integer }
+            last_page: { type: integer }
+    HealthEnvelope:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            status: { type: string, enum: [ok, degraded] }
+            checks:
+              type: object
+              additionalProperties:
+                type: object
+                properties:
+                  status: { type: string, enum: [up, down] }
+                  latency_ms: { type: [number, 'null'] }
+            checked_at: { type: string, format: date-time }
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        email_verified: { type: boolean }
+        email_verified_at: { type: [string, 'null'], format: date-time }
+        last_login_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+    CurrentUser:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        platform_role:
+          type: [object, 'null']
+          properties:
+            slug: { type: string }
+            name: { type: string }
+            permissions: { type: array, items: { type: string } }
+        memberships:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              organisation: { type: object, properties: { id: { type: string, format: uuid }, name: { type: string }, slug: { type: string } } }
+              role: { type: object, properties: { slug: { type: string }, name: { type: string } } }
+              permissions: { type: array, items: { type: string } }
+    Organisation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        event_retention_days: { type: integer }
+        settings: { type: object }
+        member_count: { type: integer, description: Platform listing only }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Membership:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user: { type: object, properties: { id: { type: string, format: uuid }, name: { type: string }, email: { type: string } } }
+        role: { type: object, properties: { slug: { type: string }, name: { type: string } } }
+        created_at: { type: string, format: date-time }
+    Role:
+      type: object
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        scope: { type: string, enum: [platform, organisation] }
+        description: { type: string }
+        permissions: { type: array, items: { type: string } }
+    AuditLog:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        action: { type: string }
+        actor: { type: [object, 'null'], properties: { id: { type: string }, name: { type: string }, email: { type: string } } }
+        target: { type: [object, 'null'], properties: { type: { type: string }, id: { type: string } } }
+        ip_address: { type: [string, 'null'] }
+        user_agent: { type: [string, 'null'] }
+        request_id: { type: [string, 'null'] }
+        metadata: { type: object }
+        created_at: { type: string, format: date-time }
+    Session:
+      type: object
+      properties:
+        id: { type: string, description: Opaque handle (not the session ID) }
+        ip_address: { type: [string, 'null'] }
+        user_agent: { type: [string, 'null'] }
+        last_active_at: { type: string, format: date-time }
+        current: { type: boolean }
+    AccessToken:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        abilities: { type: array, items: { type: string } }
+        last_used_at: { type: [string, 'null'], format: date-time }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    EventInput:
+      type: object
+      additionalProperties: false
+      required: [event_type, source, severity, timestamp]
+      properties:
+        event_type: { type: string, description: 'Catalogued type (config/kratos.php) or custom.<name>', example: authentication_failure }
+        source: { type: string, maxLength: 128, example: application_server }
+        severity: { type: string, enum: [info, low, medium, high, critical] }
+        timestamp: { type: string, format: date-time, description: 'RFC 3339 with offset; at most 5 minutes in the future' }
+        asset: { type: string, description: Name of a registered asset }
+        idempotency_key: { type: string, maxLength: 128 }
+        metadata: { type: object, description: 'Max 64 keys, depth 4, 16 KiB; typed fields per event type' }
+    SecurityEvent:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        event_type: { type: string }
+        source: { type: string }
+        severity: { type: string, enum: [info, low, medium, high, critical] }
+        occurred_at: { type: string, format: date-time }
+        received_at: { type: string, format: date-time }
+        source_ip: { type: [string, 'null'] }
+        asset: { type: [object, 'null'], properties: { id: { type: string }, name: { type: string }, criticality: { type: string } } }
+        processing_status: { type: string, enum: [received, queued, processing, processed, failed, dead_lettered] }
+        risk_score: { type: [number, 'null'], description: '0-100, set by KRATOS MIND' }
+        verdict: { type: [string, 'null'], enum: [benign, suspicious, malicious, null] }
+        threat_category: { type: [string, 'null'] }
+        analysis: { type: object, description: 'Detail view only: summary, anomaly percentile, model version, detections' }
+        metadata: { type: object }
+        processing: { type: object, description: Detail view only }
+    Asset:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        asset_type: { type: string, enum: [server, application, database, network_device, endpoint, cloud_service] }
+        hostname: { type: [string, 'null'] }
+        ip_address: { type: [string, 'null'] }
+        environment: { type: string, enum: [production, staging, development] }
+        criticality: { type: string, enum: [low, medium, high, critical] }
+        tags: { type: array, items: { type: string } }
+        description: { type: [string, 'null'] }
+        last_seen_at: { type: [string, 'null'], format: date-time }
+        events_last_24h: { type: integer }
+        retired_at: { type: [string, 'null'], format: date-time }
+    AssetInput:
+      type: object
+      properties:
+        name: { type: string }
+        asset_type: { type: string }
+        hostname: { type: [string, 'null'] }
+        ip_address: { type: [string, 'null'] }
+        environment: { type: string }
+        criticality: { type: string }
+        tags: { type: array, items: { type: string } }
+        description: { type: [string, 'null'] }
+    ApiCredential:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        key_id: { type: string }
+        scopes: { type: array, items: { type: string } }
+        status: { type: string, enum: [active, expired, revoked] }
+        last_used_at: { type: [string, 'null'], format: date-time }
+        last_used_ip: { type: [string, 'null'] }
+        expires_at: { type: [string, 'null'], format: date-time }
+        revoked_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+    OverviewStats:
+      type: object
+      properties:
+        generated_at: { type: string, format: date-time }
+        assets: { type: object }
+        events: { type: object }
+        throughput: { type: object, description: Per-minute received/processed counts for the last hour }
+        timeline: { type: array, description: 'Hourly counts by severity for the last 24 hours', items: { type: object } }
+        top_event_types: { type: array, items: { type: object } }
+        incidents: { type: 'null', description: Provided by KRATOS GUARD from Phase 4 }
+    DetectionRule:
+      type: object
+      properties:
+        key: { type: string }
+        name: { type: string }
+        description: { type: string }
+        category: { type: string }
+        severity: { type: string }
+        enabled: { type: boolean }
+        parameters: { type: object, additionalProperties: { type: number } }
+        defaults: { type: object, additionalProperties: { type: number } }
+        bounds: { type: object, additionalProperties: { type: object, properties: { min: { type: number }, max: { type: number } } } }
+        customised: { type: boolean }
+    DetectionResult:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        detector: { type: string, enum: [rule, anomaly_model, statistical] }
+        rule_key: { type: [string, 'null'] }
+        severity: { type: [string, 'null'] }
+        category: { type: [string, 'null'] }
+        score: { type: number, description: 'Units depend on the detector: rule score 0-100, anomaly percentile, or robust z' }
+        explanation: { type: string }
+        details: { type: object }
+        created_at: { type: string, format: date-time }
+        event: { type: object }
+    ModelCard:
+      type: object
+      properties:
+        name: { type: string }
+        version: { type: string }
+        algorithm: { type: string }
+        artifact_sha256: { type: string }
+        trained_at: { type: string, format: date-time }
+        metrics: { type: object }
+        limitations: { type: array, items: { type: string } }
+        model_card: { type: [string, 'null'], description: Markdown }
+        synthetic_evaluation: { type: boolean }

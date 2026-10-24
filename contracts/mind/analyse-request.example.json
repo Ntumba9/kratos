@@ -1,0 +1,30 @@
+{
+  "event": {
+    "id": "01a16a99-49f5-70a2-83dd-d2044fb974cd",
+    "event_type": "authentication_failure",
+    "source": "identity_provider",
+    "severity": "medium",
+    "occurred_at": "2026-10-23T12:00:00+00:00",
+    "source_ip": "203.0.113.66",
+    "metadata": { "failed_attempts": 14, "source_ip": "203.0.113.66", "username": "finance.lead" }
+  },
+  "context": {
+    "src_ip_events_5m": 9,
+    "src_ip_auth_failures_15m": 14,
+    "src_ip_distinct_users_1h": 1,
+    "user_auth_failures_15m": 14,
+    "user_permission_denied_1h": 0,
+    "asset_events_1h": 40,
+    "asset_hourly_mean_7d": 22.5,
+    "asset_hourly_std_7d": 6.1,
+    "type_share_7d": 0.12,
+    "type_hour_share_7d": 0.07,
+    "org_events_7d": 12000
+  },
+  "asset": { "name": "identity-provider", "criticality": "critical" },
+  "rules": [
+    { "key": "brute_force_source", "enabled": true, "severity": "high", "parameters": { "failures_15m": 10 } },
+    { "key": "credential_stuffing", "enabled": true, "severity": "high", "parameters": { "distinct_users_1h": 5 } },
+    { "key": "targeted_account_attack", "enabled": true, "severity": "medium", "parameters": { "failures_15m": 8 } }
+  ]
+}

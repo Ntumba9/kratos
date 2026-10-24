@@ -1,0 +1,44 @@
+# Secrets - never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies
+node_modules/
+core/vendor/
+
+# Build output
+command/dist/
+command/node_modules/.tmp/
+
+# Laravel runtime
+core/storage/*.key
+core/storage/logs/*
+!core/storage/logs/.gitignore
+core/.phpunit.cache/
+core/.phpunit.result.cache
+
+# Test artefacts
+e2e/test-results/
+e2e/playwright-report/
+e2e/blob-report/
+coverage/
+
+# Tooling / OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+# Trained model artefacts are rebuilt reproducibly (python -m kratos_mind.training.train)
+mind/models/

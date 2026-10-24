@@ -1,0 +1,32 @@
+[project]
+name = "kratos-mind"
+version = "0.3.0"
+description = "KRATOS MIND - detection rules, anomaly detection and risk scoring"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.32,<1",
+  "pydantic>=2.9,<3",
+  "scikit-learn>=1.6,<2",
+  "numpy>=2.1,<3",
+  "pandas>=2.2,<3",
+  "joblib>=1.4,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<9", "httpx>=0.27,<1", "ruff>=0.8,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 170
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S101", "S311"]  # asserts in tests; non-crypto RNG for synthetic data
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S"]

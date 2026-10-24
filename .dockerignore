@@ -1,0 +1,13 @@
+**/node_modules
+**/vendor
+**/.env
+core/storage/logs/*
+core/storage/framework/cache/*
+core/storage/framework/sessions/*
+core/storage/framework/views/*
+command/dist
+e2e/test-results
+e2e/playwright-report
+.git
+mind/models
+**/__pycache__
