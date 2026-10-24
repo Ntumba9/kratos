@@ -3,19 +3,31 @@
 **Autonomous Threat Intelligence & Cyber Defense Platform**
 *Built to Detect. Engineered to Defend.*
 
-KRATOS is a multi-tenant security operations platform: it ingests security
-events from systems you control, analyses them with deterministic rules and
-machine-learning anomaly detection, correlates them into incidents, and gives
-analysts a console to investigate and respond. Any disruptive response needs
-a human to approve it.
+KRATOS is a **work-in-progress** multi-tenant threat-detection platform. It
+ingests signed security events from systems you control, scores each one with
+explainable rules and machine-learning anomaly detection, and shows the results
+in an analyst console. All data is synthetic.
 
-> **Project status: Phases 1–3 of 6 complete.** Built and tested: authentication,
-> RBAC, tenant isolation, audit logging, KRATOS EYE (signed ingestion,
-> deduplication, a reliable outbox/queue pipeline, assets, live monitoring) and
-> KRATOS MIND (explainable rules, anomaly detection and risk scoring on every
-> event). Incidents (GUARD) and agents are designed (see
-> [ARCHITECTURE.md](ARCHITECTURE.md)) but not built yet. The dashboard marks
-> them as planned rather than showing sample data.
+> **Status:** Phases 1–3 of 6 are implemented and verified locally. Their
+> results, including what is still unverified, are in
+> [docs/phases/phase-3.md](docs/phases/phase-3.md).
+>
+> **Not built yet:** the "defend" half of the name: incident correlation,
+> human-approved response actions and host agents (Phases 4–5). The console
+> marks them as planned rather than showing sample data.
+>
+> **No live deployment.** The screenshots and the recording come from a local
+> Docker Compose run.
+
+| Verified (local tests and live runs) | Planned |
+| --- | --- |
+| Auth, RBAC, three-layer tenant isolation, append-only audit log | Incident correlation and investigation timeline (Phase 4) |
+| HMAC-signed ingestion, idempotency, dedup, outbox → queue pipeline | Human-approved response actions (Phase 4) |
+| 10 explainable detection rules + Isolation Forest + statistical detector | Host telemetry agent (Phase 5) |
+| Risk score, verdict, threat category with per-event evidence | MFA, benchmarks, deployment hardening (Phase 6) |
+| Outage handling for Redis and MIND (live drills, no events lost) | Real-world model evaluation (only synthetic data so far) |
+
+![Event explorer with MIND's explanation of a brute-force burst](docs/screenshots/event-explanation.png)
 
 ---
 
@@ -24,6 +36,8 @@ a human to approve it.
 - [Key features](#key-features)
 - [Architecture](#architecture)
 - [Technology stack](#technology-stack)
+- [Portfolio summary](#portfolio-summary)
+- [Local demo](#local-demo)
 - [Getting started](#getting-started)
 - [Development commands](#development-commands)
 - [Testing](#testing)
@@ -148,6 +162,89 @@ are recorded in [docs/adr/](docs/adr/).
 | Edge | Nginx | Single origin for SPA + API (first-party cookies), security headers |
 | Testing | PHPUnit 12, Vitest 3, Testing Library, Playwright | API, component and end-to-end coverage |
 | Delivery | Docker Compose, GitHub Actions | Reproducible environment and CI |
+
+## Portfolio summary
+
+**What it is:** a security-operations backend and console built as a modular
+monolith (Laravel API + React SPA), with a separate Python detection service.
+
+**Engineering decisions worth looking at:**
+- **Reliable ingestion:** the event and its outbox row are committed in one
+  transaction before `202` is returned. Delivery is at-least-once to
+  idempotent workers, with dead-letter and replay. Exactly-once is
+  deliberately not claimed ([ARCHITECTURE.md](ARCHITECTURE.md) §5).
+- **Tenant isolation in three layers:** route membership, a fail-closed query
+  scope, and policies. Each layer has its own tests.
+- **Explainable detection without a paid AI API:** every score lists the rules
+  that fired (observed value vs threshold) and the features that drove the
+  anomaly score. Model metrics are labelled as a synthetic evaluation
+  everywhere ([ADR-0007](docs/adr/0007-mind-integration.md)).
+- **Failure behaviour designed and tested:** when Redis is down, ingestion
+  stays up and login fails closed. When MIND is down, events wait and are
+  scored when it returns. Both were exercised in live drills.
+- **Contracts shared across languages:** PHP and Python tests read the same
+  request and rule fixtures (`contracts/mind/`), and an OpenAPI test keeps the
+  API documentation in sync with the routes.
+
+**Limitations (honest):** the detection model is trained and evaluated only on
+synthetic data that was designed alongside the rules, so its metrics do not
+measure real-world accuracy. Phases 4–6 are not built. There is no hosted demo.
+
+| | |
+| --- | --- |
+| ![Events sorted by risk](docs/screenshots/events-by-risk.png) | ![Threat intelligence view](docs/screenshots/threat-intelligence.png) |
+| ![Overview](docs/screenshots/overview.png) | ![Model card labelled as synthetic evaluation](docs/screenshots/model-card.png) |
+
+Screenshots come from a real local run (`e2e/showcase/capture.spec.ts`): a new
+account signs up and verifies its email, sends 46 signed synthetic events, and
+KRATOS MIND scores them. Nothing is mocked. A walkthrough recording of the
+same run is produced by the same command (see below).
+
+## Local demo
+
+Requires Docker Desktop and Node.js 22. Allow 5–10 minutes for the first
+build; MIND trains its model during startup.
+
+```bash
+git clone https://github.com/Ntumba9/kratos.git && cd kratos
+cp .env.example .env
+```
+
+Set every `CHANGE_ME` in `.env` to a random value (e.g. `openssl rand -hex 24`;
+`KRATOS_MIND_SHARED_SECRET` needs 32+ characters). Then:
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+Wait until `core`, `mind` and `postgres` report `healthy`. Then follow either
+path below.
+
+**A. Click through yourself:** open http://localhost:8080/register, verify
+the email in Mailpit (http://localhost:8025), then go to **Administration →
+Ingestion Keys → Issue key**, and send synthetic traffic:
+
+```bash
+export KRATOS_URL=http://localhost:8080 KRATOS_KEY_ID=krk_... KRATOS_SECRET=krs_...
+python tools/kratos-send/kratos_send.py simulate --scenario mixed --count 100 --rate 10
+```
+
+Open **Security Events**, sort by **Highest risk first**, and click an event to
+see MIND's explanation. **Threat Intelligence** shows verdicts, rule hits and
+the model card.
+
+**B. Scripted run with screenshots and video:**
+
+```bash
+cd e2e && npm ci && npx playwright install chromium
+KRATOS_E2E_EXPECT_TIMEOUT=60000 npx playwright test -c playwright.showcase.config.ts
+```
+
+The screenshots are written to `docs/screenshots/`. The video is written to
+`e2e/showcase-results/*/video.webm`; a copy from the documented run is at
+`docs/media/kratos-walkthrough.webm` (≈ 14 MB). The recording shows a local
+run with synthetic data, not a hosted service.
 
 ## Getting started
 
@@ -332,7 +429,7 @@ and how to report a vulnerability. In brief:
 | --- | --- | --- |
 | 1 | Architecture, environment, Laravel API, database, authentication, RBAC, tenancy, React shell | ✅ Complete |
 | 2 | Event ingestion API (HMAC credentials, schema validation, idempotency, dedup, outbox), assets, event explorer, monitoring dashboard | ✅ Complete |
-| 3 | KRATOS MIND: detection rules, Isolation Forest + statistical anomaly detection, risk scoring, model versioning | ✅ Complete |
+| 3 | KRATOS MIND: detection rules, Isolation Forest + statistical anomaly detection, risk scoring, model versioning | Implemented; verified locally, CI pending |
 | 4 | Incident correlation, investigation timeline, structured reports, human-approved response actions | Planned |
 | 5 | KRATOS AGENT, retries/dead-letter visibility, Prometheus metrics, OpenTelemetry | Planned |
 | 6 | Benchmarks, MFA, RLS evaluation, hardening, deployment preparation | Planned |

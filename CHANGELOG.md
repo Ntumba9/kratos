@@ -58,6 +58,14 @@ All notable changes to this project are documented here. The format follows
   returned `500`.
 - Evidence in the drawer was sorted across detectors with different score
   units; it is now grouped by detector.
+- Anomaly explanations showed log-transformed values instead of counts.
+- CI: the CORE job did not set `REDIS_PORT`, so the health test failed.
+- The console footer still said "Phase 1 build".
+
+### Added — portfolio
+
+- `e2e/playwright.showcase.config.ts`: a scripted local run that captures real
+  screenshots and a walkthrough video (synthetic data).
 
 ### Added — Phase 2 (KRATOS EYE: ingestion, assets, monitoring)
 

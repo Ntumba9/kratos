@@ -114,7 +114,7 @@ export function AppShell() {
           <Logo />
         </div>
         <Sidebar />
-        <div className="border-t border-graphite-700 px-4 py-3 text-[10px] tracking-wide text-ink-600">KRATOS · Phase 1 build</div>
+        <div className="border-t border-graphite-700 px-4 py-3 text-[10px] tracking-wide text-ink-600">KRATOS · Phase 3 build</div>
       </aside>
 
       {/* Mobile drawer */}

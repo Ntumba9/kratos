@@ -44,6 +44,7 @@ jobs:
       DB_OWNER_USERNAME: kratos_owner
       DB_OWNER_PASSWORD: ci-owner
       REDIS_HOST: 127.0.0.1
+      REDIS_PORT: '6379'
       REDIS_PASSWORD: ''
     defaults:
       run:

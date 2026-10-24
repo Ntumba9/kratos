@@ -77,6 +77,11 @@ def _magnitude(metadata: Mapping[str, Any]) -> float:
     return math.log1p(max(numeric)) if numeric else 0.0
 
 
+def display_value(name: str, value: float) -> float:
+    """A feature value in the units its description uses (log1p features back to counts)."""
+    return round(math.expm1(value), 2) if name.startswith("log_") else round(value, 4)
+
+
 def extract(event: Mapping[str, Any], context: Mapping[str, Any]) -> np.ndarray:
     """Turn one (event, context) pair into the model's feature vector."""
     occurred: datetime = event["occurred_at"]

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from sklearn.ensemble import IsolationForest
 
-from .features import COUNT_FEATURES, FEATURE_DESCRIPTIONS, FEATURE_NAMES
+from .features import COUNT_FEATURES, FEATURE_DESCRIPTIONS, FEATURE_NAMES, display_value
 from .schemas import AnomalyResult, FeatureContribution, StatisticalResult
 
 MAD_TO_SIGMA = 1.4826
@@ -117,8 +117,8 @@ class AnomalyModel:
                 FeatureContribution(
                     feature=name,
                     description=FEATURE_DESCRIPTIONS[name],
-                    value=round(float(x[i]), 4),
-                    typical=round(float(self.medians[i]), 4),
+                    value=display_value(name, float(x[i])),
+                    typical=display_value(name, float(self.medians[i])),
                     contribution=round(float(deltas[i]), 5),
                 )
             )
@@ -138,8 +138,8 @@ class AnomalyModel:
                     FeatureContribution(
                         feature=name,
                         description=FEATURE_DESCRIPTIONS[name],
-                        value=round(float(x[i]), 4),
-                        typical=round(float(self.medians[i]), 4),
+                        value=display_value(name, float(x[i])),
+                        typical=display_value(name, float(medians[i])),
                         contribution=round(z, 2),
                     )
                 )

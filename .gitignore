@@ -42,3 +42,4 @@ __pycache__/
 .venv/
 # Trained model artefacts are rebuilt reproducibly (python -m kratos_mind.training.train)
 mind/models/
+e2e/showcase-results/

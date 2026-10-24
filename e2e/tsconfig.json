@@ -9,5 +9,5 @@
     "noUncheckedIndexedAccess": true,
     "types": ["node"]
   },
-  "include": ["tests", "playwright.config.ts"]
+  "include": ["tests", "showcase", "playwright.config.ts", "playwright.showcase.config.ts"]
 }
